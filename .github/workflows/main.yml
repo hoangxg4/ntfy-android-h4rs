@@ -1,9 +1,9 @@
-name: Blank Repo - Auto Clone, Sync & Build Signed Release
+name: Blank Repo - Fast Sync & Build Signed Release
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Tự động chạy check vào 0h00 mỗi ngày
-  workflow_dispatch: # Nút bấm để bạn tự ép chạy thủ công ngay lập tức
+    - cron: '0 0 * * *' # Check 0h00 mỗi ngày
+  workflow_dispatch: # Nút bấm chạy thủ công
 
 jobs:
   engine:
@@ -17,13 +17,13 @@ jobs:
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
           echo "Commit SHA mới nhất của Upstream là: $UPSTREAM_SHA"
 
-      # 2. Tải chính cái repo trống này của bạn về để kiểm tra lịch sử
+      # 2. Tải repo trống của bạn về (Sử dụng Token chính chủ để lát Push không bị lỗi 128)
       - name: Checkout Your Blank Repo
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. Kiểm tra xem commit này mình đã từng build chưa (đọc từ file history nếu có)
+      # 3. Kiểm tra xem commit này đã từng build chưa
       - name: Check Build History
         id: history_check
         run: |
@@ -36,54 +36,62 @@ jobs:
           
           if [ "$LOCAL_SHA" != "${{ steps.upstream_commit.outputs.upstream_sha }}" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "==> Có commit mới hoặc chạy thủ công. Tiến hành xử lý!"
+            echo "==> Có commit mới. Tiến hành build!"
           else
             echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "==> Không có gì mới. Dừng tiến trình."
+            echo "==> Không có gì mới. Bỏ qua."
           fi
 
-      # 4. Nếu có bản mới, tiến hành Clone sạch code của Upstream về thư mục tạm
-      - name: Clone Upstream Code
+      # 4. Tải mã nguồn mới nhất dưới dạng ZIP (Nhanh gấp 5 lần so với git clone)
+      - name: Fast Download Upstream Code
         if: steps.history_check.outputs.should_build == 'true'
         run: |
-          git clone --depth 1 https://github.com/binwiederhier/ntfy-android.git upstream-source
-          # Chuyển toàn bộ code ra ngoài thư mục làm việc chính
-          cp -r upstream-source/. .
-          rm -rf upstream-source
+          curl -L https://github.com/binwiederhier/ntfy-android/archive/${{ steps.upstream_commit.outputs.upstream_sha }}.zip -o upstream.zip
+          unzip -q upstream.zip
+          mv ntfy-android-${{ steps.upstream_commit.outputs.upstream_sha }}/* .
+          rm -rf ntfy-android-${{ steps.upstream_commit.outputs.upstream_sha }} upstream.zip
 
-      # 5. Cài đặt môi trường Java
-      - name: Set up JDK 17
+      # 5. Cài đặt Java và KÍCH HOẠT GRADLE CACHE ĐỂ TĂNG TỐC BUILD
+      - name: Set up JDK 17 with Advanced Cache
         if: steps.history_check.outputs.should_build == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-          cache: 'gradle'
+          cache: 'gradle' # Tự động giữ lại các gói thư viện phụ thuộc (.gradle/caches)
 
-      # 6. Nhúng file cấu hình Firebase từ Secret vào app
+      # 6. Ép cấu hình Gradle chạy đa nhân (Parallel) và tăng bộ nhớ đệm
+      - name: Optimize Gradle Properties
+        if: steps.history_check.outputs.should_build == 'true'
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.parallel=true" >> ~/.gradle/gradle.properties
+          echo "org.gradle.caching=true" >> ~/.gradle/gradle.properties
+          echo "org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=512m" >> ~/.gradle/gradle.properties
+
+      # 7. Nhúng file cấu hình Firebase JSON
       - name: Inject Firebase JSON
         if: steps.history_check.outputs.should_build == 'true'
         run: |
           mkdir -p app
           echo '${{ secrets.FIREBASE_SECRET_JSON }}' > app/google-services.json
 
-      # 7. Thay đổi Base URL mặc định sang Server Coolify của bạn
+      # 8. Thay đổi Base URL mặc định sang Server Coolify của bạn
       - name: Change Default Base URL to Coolify Server
         if: steps.history_check.outputs.should_build == 'true'
         run: |
           sed -i 's|<string name="app_base_url" translatable="false">https://ntfy.sh</string>|<string name="app_base_url" translatable="false">https://ntfy.013666.xyz</string>|g' app/src/main/res/values/values.xml
 
-      # 8. Cấp quyền chạy cho bộ biên dịch Gradle
       - name: Grant Execute Permission for Gradlew
         if: steps.history_check.outputs.should_build == 'true'
         run: chmod +x gradlew
 
-      # 9. Thực hiện build file APK Play Release
-      - name: Build Play Release APK
+      # 9. Build Play Release APK (Thêm cờ --build-cache và --parallel để kích tốc)
+      - name: Fast Build Play Release APK
         if: steps.history_check.outputs.should_build == 'true'
-        run: ./gradlew assemblePlayRelease
+        run: ./gradlew assemblePlayRelease --build-cache --parallel --no-daemon
 
-      # 10. Ký chữ ký số Android (Sign Keystore) cho file APK
+      # 10. Ký chữ ký số Android (Sign Keystore)
       - name: Sign APK with Custom Key
         if: steps.history_check.outputs.should_build == 'true'
         id: sign_app
@@ -98,13 +106,13 @@ jobs:
         env:
           BUILD_TOOLS_VERSION: "34.0.0"
 
-      # 11. Đổi tên file APK cố định để Obtainium dễ quét
+      # 11. Đổi tên file APK cố định cho Obtainium
       - name: Rename Signed APK for Obtainium
         if: steps.history_check.outputs.should_build == 'true'
         run: |
           find app/build/outputs/apk/play/release/ -name "*-signed.apk" -exec mv {} app/build/outputs/apk/play/release/ntfy-custom-fcm.apk \;
 
-      # 12. Đẩy file APK lên mục Release kèm Tag tăng tiến theo chuỗi SHA ngắn
+      # 12. Đẩy file APK lên GitHub Release
       - name: Create GitHub Release
         if: steps.history_check.outputs.should_build == 'true'
         uses: ncipollo/release-action@v1
@@ -117,21 +125,26 @@ jobs:
           prerelease: false
           artifacts: "app/build/outputs/apk/play/release/ntfy-custom-fcm.apk"
 
-      # 13. Ghi nhận lại mã SHA vừa build vào file và lưu lại trên repo trống của bạn để lần sau đối chiếu
-      - name: Save Build History to Blank Repo
+      # 13. Fix lỗi 128: Ghi nhận lịch sử và Push an toàn bằng Token xác thực ẩn
+      - name: Save Build History and Push Safely
         if: steps.history_check.outputs.should_build == 'true'
         run: |
-          # Dọn dẹp đống code vừa clone để giữ repo luôn sạch sẽ, chỉ giữ lại thư mục .github
+          # Ép dọn dẹp để đưa repo về trạng thái sạch, chỉ giữ lại thư mục .github
           git reset --hard HEAD || true
           git clean -fdx -e .github/
           
-          # Ghi mã SHA mới vào file text làm cột mốc lịch sử
+          # Ghi đè file lịch sử mới
           mkdir -p .github
           echo "${{ steps.upstream_commit.outputs.upstream_sha }}" > .github/last_build_sha.txt
           
-          # Commit file lịch sử này lên repo
+          # Cấu hình Git nhận dạng
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Đổi URL remote chứa sẵn GITHUB_TOKEN để vượt qua xác thực quyền của GitHub
+          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          
+          # Commit và Push thẳng lên nhánh chính
           git add .github/last_build_sha.txt
           git commit -m "Update build history: ${{ steps.upstream_commit.outputs.upstream_sha }}"
           git push origin main
