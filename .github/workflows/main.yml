@@ -2,8 +2,8 @@ name: Blank Repo - Fast Sync & Build Signed Release
 
 on:
   schedule:
-    - cron: '0 0 * * *' # Check 0h00 mỗi ngày
-  workflow_dispatch: # Nút bấm chạy thủ công
+    - cron: '0 0 * * *' # Tự động chạy check vào 0h00 mỗi ngày
+  workflow_dispatch: # Nút bấm chạy thủ công ngay lập tức
 
 jobs:
   engine:
@@ -17,13 +17,13 @@ jobs:
           echo "upstream_sha=$UPSTREAM_SHA" >> $GITHUB_OUTPUT
           echo "Commit SHA mới nhất của Upstream là: $UPSTREAM_SHA"
 
-      # 2. Tải repo trống của bạn về (Sử dụng Token chính chủ để lát Push không bị lỗi 128)
+      # 2. Tải repo trống của bạn về
       - name: Checkout Your Blank Repo
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. Kiểm tra xem commit này đã từng build chưa
+      # 3. Kiểm tra xem commit này đã từng build chưa dựa trên file lịch sử
       - name: Check Build History
         id: history_check
         run: |
@@ -36,13 +36,13 @@ jobs:
           
           if [ "$LOCAL_SHA" != "${{ steps.upstream_commit.outputs.upstream_sha }}" ] || [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "==> Có commit mới. Tiến hành build!"
+            echo "==> Phát hiện commit mới hoặc ép build thủ công!"
           else
             echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "==> Không có gì mới. Bỏ qua."
+            echo "==> Code trùng khớp bản cũ. Bỏ qua để tiết kiệm thời gian."
           fi
 
-      # 4. Tải mã nguồn mới nhất dưới dạng ZIP (Nhanh gấp 5 lần so với git clone)
+      # 4. Tải nhanh mã nguồn mới nhất dưới dạng ZIP (Nhanh gấp nhiều lần clone thường)
       - name: Fast Download Upstream Code
         if: steps.history_check.outputs.should_build == 'true'
         run: |
@@ -51,16 +51,36 @@ jobs:
           mv ntfy-android-${{ steps.upstream_commit.outputs.upstream_sha }}/* .
           rm -rf ntfy-android-${{ steps.upstream_commit.outputs.upstream_sha }} upstream.zip
 
-      # 5. Cài đặt Java và KÍCH HOẠT GRADLE CACHE ĐỂ TĂNG TỐC BUILD
+      # 5. Khởi tạo định dạng ngày tháng đồng bộ cho cả Ruột APK lẫn Tag GitHub
+      - name: Generate Custom Version Format
+        if: steps.history_check.outputs.should_build == 'true'
+        id: app_version
+        run: |
+          # Tạo số phiên bản tăng tiến theo thời gian thực tế (Ví dụ: 2026.06.19)
+          CUSTOM_VER="$(date +'%Y.%m.%d')"
+          echo "detected_version=$CUSTOM_VER" >> $GITHUB_OUTPUT
+          echo "==> Phiên bản định dạng mới sẽ dùng: $CUSTOM_VER"
+
+      # 6. Ép sửa số phiên bản (versionName) ngay trong file cấu hình Gradle của App
+      - name: Inject Custom Version Into APK Code
+        if: steps.history_check.outputs.should_build == 'true'
+        run: |
+          # Dùng sed tìm và ghi đè dòng versionName trong file app/build.gradle
+          sed -i 's|versionName "[^"]*"|versionName "${{ steps.app_version.outputs.detected_version }}"|g' app/build.gradle
+          sed -i "s|versionName '[^']*'|versionName '${{ steps.app_version.outputs.detected_version }}'|g" app/build.gradle
+          echo "=== KIỂM TRA PHIÊN BẢN MỚI TRONG FILE GRADLE ==="
+          grep "versionName" app/build.gradle
+
+      # 7. Cài đặt Java và Kích hoạt bộ nhớ đệm nâng cao
       - name: Set up JDK 17 with Advanced Cache
         if: steps.history_check.outputs.should_build == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
-          cache: 'gradle' # Tự động giữ lại các gói thư viện phụ thuộc (.gradle/caches)
+          cache: 'gradle'
 
-      # 6. Ép cấu hình Gradle chạy đa nhân (Parallel) và tăng bộ nhớ đệm
+      # 8. Cấu hình ép Gradle chạy đa nhân tăng tốc kịch sàn
       - name: Optimize Gradle Properties
         if: steps.history_check.outputs.should_build == 'true'
         run: |
@@ -69,14 +89,14 @@ jobs:
           echo "org.gradle.caching=true" >> ~/.gradle/gradle.properties
           echo "org.gradle.jvmargs=-Xmx3072m -XX:MaxMetaspaceSize=512m" >> ~/.gradle/gradle.properties
 
-      # 7. Nhúng file cấu hình Firebase JSON
+      # 9. Nhúng file cấu hình Firebase JSON của bạn
       - name: Inject Firebase JSON
         if: steps.history_check.outputs.should_build == 'true'
         run: |
           mkdir -p app
           echo '${{ secrets.FIREBASE_SECRET_JSON }}' > app/google-services.json
 
-      # 8. Thay đổi Base URL mặc định sang Server Coolify của bạn
+      # 10. Thay đổi đường dẫn Base URL về Server Coolify cá nhân
       - name: Change Default Base URL to Coolify Server
         if: steps.history_check.outputs.should_build == 'true'
         run: |
@@ -86,12 +106,12 @@ jobs:
         if: steps.history_check.outputs.should_build == 'true'
         run: chmod +x gradlew
 
-      # 9. Build Play Release APK (Thêm cờ --build-cache và --parallel để kích tốc)
+      # 11. Biên dịch APK với các cờ tối ưu
       - name: Fast Build Play Release APK
         if: steps.history_check.outputs.should_build == 'true'
         run: ./gradlew assemblePlayRelease --build-cache --parallel --no-daemon
 
-      # 10. Ký chữ ký số Android (Sign Keystore)
+      # 12. Ký chữ ký số Android (Sign Keystore) bằng Key của bạn
       - name: Sign APK with Custom Key
         if: steps.history_check.outputs.should_build == 'true'
         id: sign_app
@@ -106,45 +126,44 @@ jobs:
         env:
           BUILD_TOOLS_VERSION: "34.0.0"
 
-      # 11. Đổi tên file APK cố định cho Obtainium
+      # 13. Đổi tên file APK cố định phục vụ Obtainium
       - name: Rename Signed APK for Obtainium
         if: steps.history_check.outputs.should_build == 'true'
         run: |
           find app/build/outputs/apk/play/release/ -name "*-signed.apk" -exec mv {} app/build/outputs/apk/play/release/ntfy-custom-fcm.apk \;
 
-      # 12. Đẩy file APK lên GitHub Release
+      # 14. Tạo GitHub Release với Tag trùng khớp định dạng ngày tháng: v2026.06.19
       - name: Create GitHub Release
         if: steps.history_check.outputs.should_build == 'true'
         uses: ncipollo/release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: "v.${{ steps.upstream_commit.outputs.upstream_sha }}"
-          name: "ntfy Custom FCM - Nightly Build"
+          tag: "v${{ steps.app_version.outputs.detected_version }}"
+          name: "ntfy Custom FCM - Nightly ${{ steps.app_version.outputs.detected_version }}"
+          body: |
+            Bản build tự động đồng bộ theo commit mới nhất của nhánh main.
+            Mã commit gốc (SHA): ${{ steps.upstream_commit.outputs.upstream_sha }}
           allowUpdates: true
           draft: false
           prerelease: false
           artifacts: "app/build/outputs/apk/play/release/ntfy-custom-fcm.apk"
 
-      # 13. Fix lỗi 128: Ghi nhận lịch sử và Push an toàn bằng Token xác thực ẩn
+      # 15. Dọn dẹp code tạm, lưu lịch sử SHA và Push an toàn lên repo trống
       - name: Save Build History and Push Safely
         if: steps.history_check.outputs.should_build == 'true'
         run: |
-          # Ép dọn dẹp để đưa repo về trạng thái sạch, chỉ giữ lại thư mục .github
           git reset --hard HEAD || true
           git clean -fdx -e .github/
           
-          # Ghi đè file lịch sử mới
           mkdir -p .github
           echo "${{ steps.upstream_commit.outputs.upstream_sha }}" > .github/last_build_sha.txt
           
-          # Cấu hình Git nhận dạng
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Đổi URL remote chứa sẵn GITHUB_TOKEN để vượt qua xác thực quyền của GitHub
+          # Inject Token trực tiếp vào URL để giải quyết triệt để lỗi 128
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
           
-          # Commit và Push thẳng lên nhánh chính
           git add .github/last_build_sha.txt
           git commit -m "Update build history: ${{ steps.upstream_commit.outputs.upstream_sha }}"
           git push origin main
